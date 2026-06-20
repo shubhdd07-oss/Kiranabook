@@ -568,8 +568,9 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFo
 <div class="sov" id="sh-rcpt">
   <div class="sht">
     <div class="sh-hdl"></div>
-    <div class="sh-hd"><span class="sh-ti">New Receipt Entry</span><button class="btn bsm" onclick="closeSheet('sh-rcpt')">✕</button></div>
+    <div class="sh-hd"><span class="sh-ti" id="rcpt-sheet-title">New Receipt Entry</span><button class="btn bsm" onclick="closeSheet('sh-rcpt')">✕</button></div>
     <div class="sh-bd">
+      <input type="hidden" id="r-edit-id">
       <div class="f2">
         <div class="fg"><label>Receipt No.</label><input id="r-no" readonly style="background:var(--bg)"></div>
         <div class="fg"><label>Date *</label><input type="date" id="r-dt"></div>
@@ -595,7 +596,7 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFo
     </div>
     <div class="sh-ft">
       <button class="btn bblk" onclick="closeSheet('sh-rcpt')">Cancel</button>
-      <button class="btn bp bblk" onclick="saveRcpt()">Save Receipt</button>
+      <button class="btn bp bblk" id="rcpt-save-btn" onclick="saveRcpt()">Save Receipt</button>
     </div>
   </div>
 </div>
@@ -634,12 +635,17 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFo
     <div class="sh-hd">
       <span class="sh-ti" id="bd-ti">Estimate</span>
       <div style="display:flex;gap:6px">
+        <button class="btn bsm" onclick="editCurrentBill()" title="Edit"><i class="fa fa-pen"></i></button>
         <button class="btn bsm bwa" onclick="shareCurrentBillImage()"><i class="fa-brands fa-whatsapp"></i></button>
         <button class="btn bsm bp" onclick="printCurrentBill()"><i class="fa fa-print"></i></button>
         <button class="btn bsm" onclick="closeSheet('sh-bdet')">✕</button>
       </div>
     </div>
     <div class="sh-bd" id="bd-body"></div>
+    <div class="sh-ft">
+      <button class="btn bd bblk" onclick="deleteCurrentBill()"><i class="fa fa-trash"></i> Delete</button>
+      <button class="btn bp bblk" onclick="editCurrentBill()"><i class="fa fa-pen"></i> Edit</button>
+    </div>
   </div>
 </div>
 
@@ -1101,20 +1107,41 @@ function shareImageToWA(b,lid_override){
   }
 }
 function openWAWithCanvas(canvas,fname,mob,isMobile){
-  // Use JPEG at 92% quality — smaller file, faster to share
+  var safeName=(fname||'KiranaBook').replace(/[^a-zA-Z0-9_-]/g,'_')+'.jpg';
   canvas.toBlob(function(blob){
-    var url=URL.createObjectURL(blob);
-    var a=document.createElement('a');a.href=url;a.download=(fname||'KiranaBook').replace(/[^a-zA-Z0-9_-]/g,'_')+'.jpg';
-    document.body.appendChild(a);a.click();
-    setTimeout(function(){
-      document.body.removeChild(a);
-      var msg=encodeURIComponent('Please find the attached image. (Saved to your Photos/Downloads — open WhatsApp and attach it)');
-      var waUrl=mob?'https://wa.me/91'+mob+'?text='+msg:'https://wa.me/?text='+msg;
-      setTimeout(function(){window.open(waUrl,'_blank');},isMobile?1800:400);
-      URL.revokeObjectURL(url);
-      toast('JPEG downloaded → opening WhatsApp');
-    },300);
+    // Try Web Share API first (iPhone Safari supports this — opens native share sheet)
+    if(navigator.share&&navigator.canShare){
+      var file=new File([blob],safeName,{type:'image/jpeg'});
+      if(navigator.canShare({files:[file]})){
+        navigator.share({
+          files:[file],
+          title:'KiranaBook',
+          text:mob?'Outstanding statement / estimate':'KiranaBook statement'
+        }).then(function(){
+          toast('Shared successfully!');
+        }).catch(function(e){
+          if(e.name!=='AbortError')_fallbackWA(blob,safeName,mob,isMobile);
+        });
+        return;
+      }
+    }
+    // Fallback: download image, open WhatsApp
+    _fallbackWA(blob,safeName,mob,isMobile);
   },'image/jpeg',0.92);
+}
+
+function _fallbackWA(blob,fname,mob,isMobile){
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a');a.href=url;a.download=fname;
+  document.body.appendChild(a);a.click();
+  setTimeout(function(){
+    document.body.removeChild(a);
+    var msg=encodeURIComponent('Please find the attached image (saved to your Photos). Sending from KiranaBook.');
+    var waUrl=mob?'https://wa.me/91'+mob+'?text='+msg:'https://wa.me/?text='+msg;
+    setTimeout(function(){window.open(waUrl,'_blank');},isMobile?1800:400);
+    URL.revokeObjectURL(url);
+    toast('Image saved → opening WhatsApp to attach');
+  },300);
 }
 
 function shareCurrentBillImage(){shareImageToWA(_printBill,null)}
@@ -1218,7 +1245,65 @@ function openBillDet(bid){
   openSheet('sh-bdet');
 }
 
-// ===== LEDGERS =====
+// ===== EDIT BILL =====
+function editCurrentBill(){
+  var b=_printBill;if(!b){toast('No bill selected');return}
+  closeSheet('sh-bdet');
+  // Reverse stock effect before editing
+  b.items.forEach(function(r){
+    var it=S.items.find(x=>x.id===r.iid);if(!it)return;
+    var a=au(it);var conv=parseFloat(it.conv||1)||1;
+    var qty=parseFloat(r.qty||0);
+    if(a&&r.qu===a)qty=qty*conv;
+    // Undo original stock effect
+    if(b.docType==='estimate')it.stk=parseFloat(it.stk||0)+qty;
+    else it.stk=Math.max(0,parseFloat(it.stk||0)-qty);
+  });
+  // Remove from bills array
+  S.bills=S.bills.filter(x=>x.id!==b.id);
+  // Restore counter
+  if(b.docType==='estimate')S.ec=Math.max(1,S.ec-1);
+  else S.pc=Math.max(1,S.pc-1);
+  // Load into bill screen
+  S.docType=b.docType;
+  S.rows=b.items.map(function(r){return Object.assign({},r,{lastEdited:r.lastEdited||'rate'})});
+  // Navigate to bill screen
+  goTo('bill',document.querySelectorAll('.nt')[1]);
+  // Set fields after screen loads
+  setTimeout(function(){
+    setDocType(b.docType);
+    document.getElementById('b-no').value=b.no;
+    document.getElementById('b-date').value=b.date;
+    document.getElementById('b-type').value=b.type;
+    fillSel('b-party',S.ledgers,'— Select —');
+    if(b.lid){
+      var pw=document.getElementById('b-pw');
+      var ps=document.getElementById('b-party');
+      pw.style.opacity='1';ps.disabled=false;ps.value=b.lid;
+      document.getElementById('qa-party-row').style.display='flex';
+    }
+    renderRows();recalc();
+    toast('Bill loaded for editing — save when done');
+  },100);
+}
+
+// ===== DELETE BILL =====
+function deleteCurrentBill(){
+  var b=_printBill;if(!b)return;
+  if(!confirm('Delete '+b.no+'? Stock effect will be reversed.'))return;
+  b.items.forEach(function(r){
+    var it=S.items.find(x=>x.id===r.iid);if(!it)return;
+    var a=au(it);var conv=parseFloat(it.conv||1)||1;
+    var qty=parseFloat(r.qty||0);
+    if(a&&r.qu===a)qty=qty*conv;
+    if(b.docType==='estimate')it.stk=parseFloat(it.stk||0)+qty;
+    else it.stk=Math.max(0,parseFloat(it.stk||0)-qty);
+  });
+  S.bills=S.bills.filter(x=>x.id!==b.id);
+  closeSheet('sh-bdet');renderBills();cloudSave();
+  toast(b.no+' deleted');
+}
+
 function openLedgerSheet(){
   ['l-name','l-cont','l-mob','l-ph2','l-email','l-addr','l-city','l-pin','l-note'].forEach(id=>{var e=document.getElementById(id);if(e)e.value=''});
   document.getElementById('l-clim').value='';document.getElementById('l-cday').value='';
@@ -1282,13 +1367,25 @@ function renderItems(filter){
 function filterItems(v){renderItems(v)}
 
 // ===== RECEIPTS =====
-function openRcptSheet(){
-  document.getElementById('r-no').value='RCT-'+String(S.rc).padStart(4,'0');
-  document.getElementById('r-dt').value=today();
-  document.getElementById('r-amt').value='';
-  document.getElementById('r-ref').value='';document.getElementById('r-narr').value='';
+function openRcptSheet(editId){
+  var existing=editId?S.rcpts.find(x=>x.id===editId):null;
+  document.getElementById('r-edit-id').value=editId||'';
+  document.getElementById('rcpt-sheet-title').textContent=editId?'Edit Receipt':'New Receipt Entry';
+  document.getElementById('rcpt-save-btn').textContent=editId?'Update Receipt':'Save Receipt';
+  document.getElementById('r-no').value=existing?existing.no:'RCT-'+String(S.rc).padStart(4,'0');
+  document.getElementById('r-dt').value=existing?existing.date:today();
+  document.getElementById('r-amt').value=existing?existing.amt:'';
+  document.getElementById('r-ref').value=existing?existing.ref||'':'';
+  document.getElementById('r-narr').value=existing?existing.narr||'':'';
   document.getElementById('r-outs').innerHTML='';document.getElementById('r-nbal').innerHTML='';
   fillSel('r-party',S.ledgers,'— Select Party —');
+  if(existing){
+    document.getElementById('r-party').value=existing.lid||'';
+    document.getElementById('r-mode').value=existing.mode||'Cash';
+    rcptPartyChg();
+  } else {
+    document.getElementById('r-mode').value='Cash';
+  }
   openSheet('sh-rcpt');
 }
 function rcptPartyChg(){
@@ -1307,16 +1404,50 @@ function saveRcpt(){
   var lid=document.getElementById('r-party').value;
   var amt=parseFloat(document.getElementById('r-amt').value||0);
   var date=document.getElementById('r-dt').value;
+  var editId=document.getElementById('r-edit-id').value;
   if(!lid){toast('Select a party');return}
   if(!amt||amt<=0){toast('Enter valid amount');return}
   if(!date){toast('Select a date');return}
-  S.rcpts.push({id:uid(),no:document.getElementById('r-no').value,lid,date,amt,mode:document.getElementById('r-mode').value,ref:document.getElementById('r-ref').value,narr:document.getElementById('r-narr').value});
-  S.rc++;closeSheet('sh-rcpt');renderRcpts();cloudSave();toast('Receipt saved!');
+  var rcpt={
+    id:editId||uid(),
+    no:document.getElementById('r-no').value,
+    lid,date,amt,
+    mode:document.getElementById('r-mode').value,
+    ref:document.getElementById('r-ref').value,
+    narr:document.getElementById('r-narr').value
+  };
+  if(editId){
+    // Update existing
+    var idx=S.rcpts.findIndex(x=>x.id===editId);
+    if(idx>-1)S.rcpts[idx]=rcpt;
+  } else {
+    S.rcpts.push(rcpt);
+    S.rc++;
+  }
+  closeSheet('sh-rcpt');renderRcpts();cloudSave();
+  toast(editId?'Receipt updated!':'Receipt saved!');
 }
 function renderRcpts(){
   var c=document.getElementById('rcpt-list');
   if(!S.rcpts.length){c.innerHTML='<div class="empty"><i class="fa fa-hand-holding-dollar"></i><p>No receipts yet. Tap "New Receipt" to add.</p></div>';return}
-  c.innerHTML='<div class="card" style="margin-top:4px">'+S.rcpts.slice().reverse().map(r=>{var l=S.ledgers.find(x=>x.id===r.lid);return`<div class="li"><div class="av" style="background:var(--gb);color:var(--g)"><i class="fa fa-arrow-down-long"></i></div><div class="lm"><div class="ln">${r.no}</div><div class="ls">${l?l.name:'—'} · ${fd(r.date)}</div></div><div class="lr"><div class="la" style="color:var(--g)">${fm(r.amt)}</div><span class="bdg bbl">${r.mode}</span></div></div>`}).join('')+'</div>';
+  c.innerHTML='<div class="card" style="margin-top:4px">'+S.rcpts.slice().reverse().map(r=>{
+    var l=S.ledgers.find(x=>x.id===r.lid);
+    return'<div class="li" style="cursor:default">'
+      +'<div class="av" style="background:var(--gb);color:var(--g)"><i class="fa fa-arrow-down-long"></i></div>'
+      +'<div class="lm"><div class="ln">'+r.no+'</div><div class="ls">'+(l?l.name:'—')+' · '+fd(r.date)+(r.narr?' · '+r.narr:'')+'</div></div>'
+      +'<div class="lr" style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">'
+      +'<div class="la" style="color:var(--g)">'+fm(r.amt)+'</div>'
+      +'<div style="display:flex;gap:4px">'
+      +'<span class="bdg bbl">'+r.mode+'</span>'
+      +'<button class="btn bsm" style="padding:2px 8px;font-size:11px" onclick="openRcptSheet(\''+r.id+'\')"><i class="fa fa-pen"></i></button>'
+      +'<button class="btn bsm" style="padding:2px 8px;font-size:11px;color:var(--rd);border-color:var(--rd)" onclick="deleteRcpt(\''+r.id+'\')"><i class="fa fa-trash"></i></button>'
+      +'</div></div></div>';
+  }).join('')+'</div>';
+}
+function deleteRcpt(id){
+  if(!confirm('Delete this receipt?'))return;
+  S.rcpts=S.rcpts.filter(x=>x.id!==id);
+  renderRcpts();cloudSave();toast('Receipt deleted');
 }
 
 // ===== BILLS LIST =====
